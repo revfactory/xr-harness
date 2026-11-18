@@ -1,0 +1,227 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Motion Deck</title>
+<link rel="icon" href="data:,">
+<style>
+  :root { --ink: #F5F2EA; --dim: rgba(245,242,234,.6); --accent: #E3B23C; --bg: #000; --panel: #16181C; --line: #2A2D33; --font: 'Pretendard', 'Apple SD Gothic Neo', system-ui, sans-serif; }
+  html, body { margin: 0; height: 100%; background: var(--bg); color: var(--ink); font-family: var(--font); overflow: hidden; }
+  body.audience { cursor: none; }
+  body.audience.cursor { cursor: default; }
+  #stage { position: fixed; inset: 0; width: 100%; height: 100%; object-fit: contain; background: #000; }
+  #black { position: fixed; inset: 0; background: #000; display: none; z-index: 5; }
+  #black.on { display: block; }
+  #hud { position: fixed; left: 16px; bottom: 14px; z-index: 6; font: 600 13px/1.4 var(--font); background: rgba(0,0,0,.6); padding: 6px 10px; border-radius: 8px; display: none; }
+  #hud.on { display: block; }
+  #prog { position: fixed; left: 0; bottom: 0; height: 3px; width: 0; background: var(--accent); z-index: 6; display: none; }
+  #prog.on { display: block; }
+  #jump { position: fixed; right: 20px; bottom: 16px; z-index: 7; font: 800 28px/1 var(--font); background: rgba(0,0,0,.7); padding: 10px 14px; border-radius: 10px; display: none; }
+  #help { position: fixed; inset: 0; z-index: 8; display: none; place-items: center; background: rgba(0,0,0,.78); }
+  #help.on { display: grid; }
+  #help table { border-collapse: collapse; font-size: 17px; }
+  #help td { padding: 6px 16px; border-bottom: 1px solid var(--line); }
+  #help td:first-child { color: var(--accent); font-weight: 700; text-align: right; }
+  /* 장의 link: 멈춤 화면에서만 켜지는 누를 자리. 화면의 주소 글자 위에 투명하게 놓인다 */
+  .lk { position: fixed; z-index: 4; display: none; border-radius: 6px; cursor: pointer; }
+  .lk.on { display: block; }
+  body.cursor .lk.on:hover { outline: 2px solid var(--accent); outline-offset: 2px; }
+  #msg { position: fixed; inset: 0; display: none; place-items: center; text-align: center; font-size: 20px; padding: 40px; }
+  /* 발표자 화면 */
+  body.presenter { background: #0E0F12; cursor: default; }
+  .pv { display: grid; grid-template-columns: 1.55fr 1fr; grid-template-rows: auto 1fr auto; gap: 16px; height: 100vh; padding: 18px; box-sizing: border-box; }
+  .pv header { grid-column: 1 / 3; display: flex; justify-content: space-between; align-items: baseline; }
+  .pv h1 { margin: 0; font-size: 22px; font-weight: 800; }
+  .pv .clock { font-size: 34px; font-weight: 800; font-variant-numeric: tabular-nums; }
+  .pv .clock small { font-size: 16px; color: var(--dim); margin-left: 12px; font-weight: 600; }
+  .pv .cur, .pv .side { background: var(--panel); border-radius: 14px; padding: 14px; overflow: hidden; display: flex; flex-direction: column; gap: 10px; min-height: 0; }
+  .pv img { width: 100%; aspect-ratio: 16 / 9; object-fit: contain; background: #000; border-radius: 8px; }
+  .pv .label { font-size: 13px; color: var(--dim); font-weight: 700; letter-spacing: .04em; }
+  .pv .title { font-size: 24px; font-weight: 800; }
+  .pv .notes { font-size: 22px; line-height: 1.55; overflow: auto; white-space: pre-wrap; flex: 1; min-height: 0; }
+  .pv .state { color: var(--accent); font-weight: 800; }
+  .pv footer { grid-column: 1 / 3; display: flex; gap: 6px; flex-wrap: wrap; }
+  .pv footer button { font: 700 13px var(--font); color: var(--ink); background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 6px 9px; cursor: pointer; }
+  .pv footer button.now { background: var(--accent); color: #000; }
+</style>
+</head>
+<body>
+<script src="chapters.js"></script>
+<script>
+(() => {
+  'use strict';
+  const D = window.DECK;
+  const qs = new URLSearchParams(location.search);
+  const isPresenter = qs.get('view') === 'presenter';
+  const showMsg = (t) => { const m = document.createElement('div'); m.id = 'msg'; m.style.display = 'grid'; m.textContent = t; document.body.appendChild(m); };
+  if (!D || !Array.isArray(D.chapters) || !D.chapters.length) { showMsg('chapters.js를 찾지 못했다. deck_build.py build 로 만든 presenter 폴더에서 연다.'); return; }
+  const CH = D.chapters, FPS = D.fps || 30, HALF = 0.5 / FPS, Q = 0.25 / FPS; // Q: 멈춤 프레임 구간 안쪽으로 탐색해 앞 프레임이 보이지 않게 한다
+  const fmt = (s) => { s = Math.max(0, Math.floor(s)); return `${String(Math.floor(s / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`; };
+
+  // ───────────── 발표자 화면 ─────────────
+  if (isPresenter) {
+    document.body.className = 'presenter';
+    document.title = '발표자 화면 — ' + (D.title || 'Motion Deck');
+    document.body.insertAdjacentHTML('beforeend', `
+      <div class="pv">
+        <header><h1>${D.title || ''}</h1><div class="clock"><span id="el">00:00</span><small id="wall"></small></div></header>
+        <section class="cur"><div class="label">지금 <span id="cn"></span> · <span class="state" id="st"></span></div><img id="ci" alt=""><div class="title" id="ct"></div><div class="notes" id="nt"></div></section>
+        <section class="side"><div class="label">다음</div><img id="ni" alt=""><div class="title" id="nx"></div><div class="label" style="margin-top:auto">→/Space 다음 · ← 이전 · R 다시 재생 · 번호+Enter 이동 · B 검은 화면</div></section>
+        <footer id="list"></footer>
+      </div>`);
+    const $ = (id) => document.getElementById(id);
+    const list = $('list');
+    CH.forEach((c, i) => { const b = document.createElement('button'); b.textContent = String(i + 1); b.title = c.title; b.onclick = () => send({ cmd: 'goto', n: i }); list.appendChild(b); });
+    let started = null;
+    const send = (m) => { if (window.opener) window.opener.postMessage({ deck: 1, type: 'cmd', ...m }, '*'); };
+    function render(s) {
+      const i = s.idx, c = CH[i], n = CH[i + 1];
+      $('cn').textContent = i < 0 ? '대기' : `${i + 1} / ${CH.length}`;
+      $('st').textContent = s.state === 'playing' ? '재생 중' : s.state === 'hold' ? '멈춤' : '대기';
+      $('ct').textContent = c ? c.title : '대기 화면';
+      $('nt').textContent = c ? (c.notes || '') : (CH[0].notes || '');
+      $('ci').src = c ? c.still : (D.standby || CH[0].still);
+      $('ni').src = n ? n.still : (i < 0 ? CH[0].still : '');
+      $('nx').textContent = n ? n.title : (i < 0 ? CH[0].title : '마지막 장');
+      [...list.children].forEach((b, k) => b.classList.toggle('now', k === i));
+      if (s.startedAt && !started) started = s.startedAt;
+    }
+    addEventListener('message', (e) => { const m = e.data; if (m && m.deck && m.type === 'state') render(m); });
+    addEventListener('keydown', (e) => { e.preventDefault(); send({ cmd: 'key', key: e.key, shift: e.shiftKey }); });
+    setInterval(() => { $('el').textContent = started ? fmt((Date.now() - started) / 1000) : '00:00'; $('wall').textContent = new Date().toLocaleTimeString('ko-KR', { hour: '2-digit', minute: '2-digit' }); }, 250);
+    send({ cmd: 'hello' });
+    return;
+  }
+
+  // ───────────── 청중 화면 ─────────────
+  document.body.className = 'audience';
+  document.title = D.title || 'Motion Deck';
+  document.body.insertAdjacentHTML('beforeend', `
+    <video id="stage" preload="auto" playsinline></video>
+    <div id="black"></div><div id="hud"></div><div id="prog"></div><div id="jump"></div>
+    <div id="help"><table>
+      <tr><td>→ · Space · PageDown · 클릭</td><td>다음 장 재생(재생 중이면 바로 멈춤 화면으로)</td></tr>
+      <tr><td>← · PageUp · 오른쪽 클릭</td><td>이전 장의 멈춤 화면</td></tr>
+      <tr><td>R</td><td>지금 장을 처음부터 다시 재생</td></tr>
+      <tr><td>번호 + Enter</td><td>그 장의 멈춤 화면으로 이동</td></tr>
+      <tr><td>Home · End</td><td>대기 화면 · 마지막 장</td></tr>
+      <tr><td>B · .</td><td>검은 화면 켜기/끄기</td></tr>
+      <tr><td>M</td><td>소리 끄기/켜기(음악·효과음)</td></tr>
+      <tr><td>P</td><td>발표자 화면(노트·다음 장·시간) 열기</td></tr>
+      <tr><td>X</td><td>XR 시연 페이지 새 탭으로 열기</td></tr>
+      <tr><td>화면의 주소 클릭</td><td>멈춤 화면에 주소가 있는 장: 그 주소를 새 탭으로 열기</td></tr>
+      <tr><td>F</td><td>전체 화면</td></tr>
+      <tr><td>G</td><td>장 번호·진행 막대 표시(리허설용)</td></tr>
+      <tr><td>H · ?</td><td>이 도움말</td></tr>
+    </table></div>`);
+  const v = document.getElementById('stage');
+  const hud = document.getElementById('hud'), prog = document.getElementById('prog'), jump = document.getElementById('jump');
+  v.src = D.video;
+  v.muted = false;
+
+  let idx = -1;            // -1: 대기 화면(0초). i: i번째 장의 멈춤 화면
+  let state = 'standby';   // standby | playing | hold
+  let target = null;       // { i, t } 재생해서 도달할 멈춤 시각
+  let startedAt = null;
+  let presenterWin = null;
+  let digits = '';
+
+  // 장의 link: 영상이 실제로 그려지는 상자(object-fit: contain) 안의 rect 자리에 놓는다. 멈춤 화면에서만 켠다
+  const links = CH.map((c, i) => {
+    if (!c.link || !c.link.url || !c.link.rect) return null;
+    const a = document.createElement('a'); a.className = 'lk'; a.href = c.link.url; a.target = '_blank'; a.rel = 'noopener'; a.title = c.link.url; a.tabIndex = -1;
+    a.addEventListener('mousedown', (e) => e.stopPropagation());   // 다음 장으로 넘어가지 않게 한다
+    a.addEventListener('click', (e) => { e.preventDefault(); e.stopPropagation(); window.open(c.link.url, '_blank', 'noopener'); a.blur(); });
+    document.body.appendChild(a); return { a, i, r: c.link.rect };
+  }).filter(Boolean);
+  function placeLinks() {
+    const vw = v.videoWidth || 1920, vh = v.videoHeight || 1080, k = Math.min(innerWidth / vw, innerHeight / vh);
+    const ox = (innerWidth - vw * k) / 2, oy = (innerHeight - vh * k) / 2;
+    links.forEach(({ a, i, r }) => {
+      a.classList.toggle('on', state === 'hold' && idx === i && !document.getElementById('black').classList.contains('on'));
+      a.style.left = `${ox + r[0] * k}px`; a.style.top = `${oy + r[1] * k}px`; a.style.width = `${r[2] * k}px`; a.style.height = `${r[3] * k}px`;
+    });
+  }
+  addEventListener('resize', placeLinks);
+  function broadcast() {
+    placeLinks();
+    const s = { deck: 1, type: 'state', idx, state, startedAt };
+    if (presenterWin && !presenterWin.closed) presenterWin.postMessage(s, '*');
+    hud.textContent = idx < 0 ? `대기 · ${CH.length}장` : `${idx + 1} / ${CH.length} · ${CH[idx].title}${state === 'playing' ? ' · 재생 중' : ''}${v.muted ? ' · 소리 끔' : ''}`;
+    prog.style.width = `${((idx + 1) / CH.length) * 100}%`;
+  }
+  function seekHold(i) {
+    target = null; v.pause();
+    if (i < 0) { idx = -1; state = 'standby'; v.currentTime = 0; }
+    else { idx = Math.min(i, CH.length - 1); state = 'hold'; v.currentTime = CH[idx].hold + Q; }
+    broadcast();
+  }
+  function playTo(i, from) {
+    if (i >= CH.length) return;
+    target = { i, t: CH[i].hold };
+    if (typeof from === 'number') v.currentTime = from;
+    state = 'playing';
+    if (!startedAt) startedAt = Date.now();
+    const p = v.play(); if (p && p.catch) p.catch(() => { v.muted = true; v.play(); }); // 자동 재생이 막히면 소리 없이라도 진행
+    broadcast();
+  }
+  function next() {
+    if (state === 'playing' && target) { seekHold(target.i); return; } // 빠르게 두 번 누르면 멈춤 화면으로 건너뛴다
+    playTo(idx + 1);
+  }
+  function prev() { seekHold(idx - 1); }
+  function replay() { if (idx >= 0) playTo(idx, CH[idx].start); }
+
+  // 멈춤 시각 감시: 프레임마다 확인하고, 도달하면 정확한 멈춤 프레임으로 맞춘다
+  function arrive() {
+    if (state === 'playing' && target && v.currentTime >= target.t - HALF) {
+      v.pause(); v.currentTime = target.t + Q; idx = target.i; state = 'hold'; target = null; broadcast();
+    }
+  }
+  if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+    const onFrame = () => { arrive(); v.requestVideoFrameCallback(onFrame); };
+    v.requestVideoFrameCallback(onFrame);
+  }
+  (function loop() { arrive(); requestAnimationFrame(loop); })();
+  v.addEventListener('ended', () => { if (state === 'playing') { idx = CH.length - 1; state = 'hold'; target = null; broadcast(); } });
+
+  function key(k, shift) {
+    if (/^[0-9]$/.test(k)) { digits += k; jump.textContent = digits; jump.style.display = 'block'; return; }
+    if (k === 'Enter' && digits) { const n = parseInt(digits, 10) - 1; digits = ''; jump.style.display = 'none'; if (n >= 0) seekHold(n); return; }
+    if (k === 'Escape') { digits = ''; jump.style.display = 'none'; document.getElementById('help').classList.remove('on'); return; }
+    switch (k) {
+      case 'ArrowRight': case 'ArrowDown': case 'PageDown': case ' ': case 'Enter': next(); break;
+      case 'ArrowLeft': case 'ArrowUp': case 'PageUp': if (shift) replay(); else prev(); break;
+      case 'r': case 'R': replay(); break;
+      case 'Home': seekHold(-1); break;
+      case 'End': seekHold(CH.length - 1); break;
+      case 'b': case 'B': case '.': document.getElementById('black').classList.toggle('on'); placeLinks(); break;
+      case 'm': case 'M': v.muted = !v.muted; broadcast(); break; // 발표장 사정에 따라 소리를 끄고 진행
+      case 'f': case 'F': if (!document.fullscreenElement) document.documentElement.requestFullscreen?.(); else document.exitFullscreen?.(); break;
+      case 'g': case 'G': hud.classList.toggle('on'); prog.classList.toggle('on'); break;
+      case 'h': case 'H': case '?': document.getElementById('help').classList.toggle('on'); break;
+      case 'p': case 'P': presenterWin = window.open(location.pathname + '?view=presenter', 'deck-presenter', 'width=1280,height=800'); setTimeout(broadcast, 600); break;
+      case 'x': case 'X': if (D.xrUrl) window.open(D.xrUrl, '_blank'); break;
+    }
+  }
+  addEventListener('keydown', (e) => { if (e.metaKey || e.ctrlKey || e.altKey) return; e.preventDefault(); key(e.key, e.shiftKey); });
+  addEventListener('mousedown', (e) => { if (e.button === 0) next(); else if (e.button === 2) prev(); });
+  addEventListener('contextmenu', (e) => e.preventDefault());
+  addEventListener('message', (e) => {
+    const m = e.data; if (!m || !m.deck || m.type !== 'cmd') return;
+    if (e.source && e.source !== window) presenterWin = e.source;
+    if (m.cmd === 'hello') broadcast();
+    else if (m.cmd === 'goto') seekHold(m.n);
+    else if (m.cmd === 'key') key(m.key, m.shift);
+  });
+  let hideT; addEventListener('mousemove', () => { document.body.classList.add('cursor'); clearTimeout(hideT); hideT = setTimeout(() => document.body.classList.remove('cursor'), 1800); });
+
+  // 시작 위치: ?start=N 이면 N번째 장의 멈춤 화면(리허설용), 아니면 0초 대기 화면
+  v.addEventListener('loadedmetadata', () => { const s = parseInt(qs.get('start') || '0', 10); if (s > 0) seekHold(s - 1); else seekHold(-1); }, { once: true });
+  window.__deck = { get idx() { return idx; }, get state() { return state; }, get t() { return v.currentTime; }, next, prev, replay, seekHold, key,
+    get links() { return links.map(({ a, i }) => ({ i, url: a.href, on: a.classList.contains('on'), box: a.getBoundingClientRect().toJSON() })); } };
+})();
+</script>
+</body>
+</html>
